@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Exactly-once event de-duplication engine: simulation</title>
+<style>
+:root{--bg:#0f1420;--card:#171e2e;--line:#2a3550;--tx:#e6ebf5;--mu:#8e9ab3;--ok:#3fc9a5;--warn:#f2b64a;--bad:#ff6b6b;--ac:#7aa7ff;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0 auto;max-width:1080px;padding:22px 16px 40px;background:var(--bg);color:var(--tx);font:15px/1.55 "Segoe UI",system-ui,-apple-system,Roboto,sans-serif}
+h1{font-size:1.4rem;margin:0 0 4px;letter-spacing:-.01em}
+h2{font-size:.95rem;margin:0 0 10px}
+.sub{color:var(--mu);margin:0 0 18px;max-width:70ch}
+.flow{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch;margin-bottom:6px}
+.arr{align-self:center;color:var(--mu)}
+.node{flex:1 1 130px;min-width:130px;background:var(--card);border:1.5px solid var(--line);border-radius:10px;padding:10px 12px;transition:border-color .25s}
+.node h3{margin:0;font-size:.82rem;font-weight:600;color:var(--mu)}
+.node .big{font-size:1.5rem;font-weight:700;line-height:1.3}
+.node .sm{font-size:.78rem;color:var(--mu)}
+.bar{height:4px;margin-top:7px;background:var(--line);border-radius:2px;overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:var(--ok);transition:width .2s,background .25s}
+.node.warn{border-color:var(--warn)}.node.warn .bar i{background:var(--warn)}
+.node.bad{border-color:var(--bad)}.node.bad .bar i{background:var(--bad)}
+.note{font-size:.8rem;color:var(--mu);margin:0 0 16px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:14px}
+.ctl{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px 22px}
+label{display:block;font-size:.85rem}
+label output{float:right;color:var(--ac);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--ac)}
+.chk{display:flex;gap:8px;align-items:flex-start}
+.chk small{display:block;color:var(--mu)}
+.row{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+button{font:inherit;font-size:.85rem;color:var(--tx);background:#202a40;border:1px solid var(--line);border-radius:8px;padding:6px 12px;cursor:pointer}
+button:hover{border-color:var(--ac)}
+:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
+.score{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.score span{display:block;font-size:.78rem;color:var(--mu)}
+.score b{font-size:1.25rem}
+#verdict{margin:12px 0 0;font-weight:600}
+#log{list-style:none;margin:0;padding:0;max-height:160px;overflow:auto;font:12.5px/1.7 ui-monospace,Consolas,monospace;color:var(--mu)}
+#log li b{color:var(--tx);font-weight:600}
+ol{margin:0;padding-left:20px;color:var(--mu);font-size:.88rem}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<h1>Exactly-once event de-duplication engine</h1>
+<p class="sub">Producers retry, networks repeat messages, and stores slow down. Push load through this pipeline and see when the engine keeps each event to a single effect, and what breaks when it can't.</p>
+
+<div class="flow" aria-label="Pipeline">
+  <div class="node" id="n-prod"><h3>Event producers</h3><div class="big" id="v-prod">0/s</div><div class="sm" id="s-prod"></div><div class="bar"><i id="b-prod"></i></div></div><span class="arr">→</span>
+  <div class="node" id="n-str"><h3>Event stream</h3><div class="big" id="v-str">0</div><div class="sm">events waiting (lag)</div><div class="bar"><i id="b-str"></i></div></div><span class="arr">→</span>
+  <div class="node" id="n-wrk"><h3>De-dup worker</h3><div class="big" id="v-wrk">0/s</div><div class="sm" id="s-wrk"></div><div class="bar"><i id="b-wrk"></i></div></div><span class="arr">→</span>
+  <div class="node" id="n-sto"><h3>Processed-events store</h3><div class="big" id="v-sto">0%</div><div class="sm" id="s-sto"></div><div class="bar"><i id="b-sto"></i></div></div><span class="arr">→</span>
+  <div class="node" id="n-snk"><h3>Downstream sink</h3><div class="big" id="v-snk">0</div><div class="sm" id="s-snk"></div><div class="bar"><i id="b-snk"></i></div></div>
+</div>
+<div class="flow">
+  <div class="node" id="n-ret"><h3>Retry / redelivery</h3><div class="big" id="v-ret">0/s</div><div class="sm" id="s-ret"></div><div class="bar"><i id="b-ret"></i></div></div>
+  <div class="node" id="n-dlq"><h3>Dead letter queue</h3><div class="big" id="v-dlq">0</div><div class="sm">events given up on</div><div class="bar"><i id="b-dlq"></i></div></div>
+</div>
+<p class="note">The store sits after the worker. Writes that time out go to retry, and exhausted retries land in the dead letter queue.</p>
+
+<div class="panel">
+  <h2>Controls</h2>
+  <div class="ctl">
+    <label>Event load <output id="o-load"></output><input type="range" id="load" min="10" max="300" value="50"></label>
+    <label>Duplicate rate <output id="o-dup"></output><input type="range" id="dup" min="0" max="60" value="20"></label>
+    <label>Store lock contention <output id="o-lock"></output><input type="range" id="lock" min="0" max="100" value="0"></label>
+    <label class="chk"><input type="checkbox" id="dd" checked><span>De-duplication on<small>Look up each event ID and drop repeats.</small></span></label>
+    <label class="chk"><input type="checkbox" id="idem" checked><span>Atomic, idempotent write<small>Record the ID and apply the effect in one transaction, so a retry can't apply twice.</small></span></label>
+  </div>
+  <div class="row">
+    <button id="p-ok">Healthy system</button>
+    <button id="p-storm">Retry storm</button>
+    <button id="p-naive">Storm without idempotent writes</button>
+    <button id="pause">Pause</button>
+    <button id="reset">Reset counters</button>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Result</h2>
+  <div class="score">
+    <div><span>Unique events sent</span><b id="c-sent">0</b></div>
+    <div><span>Applied exactly once</span><b id="c-done">0</b></div>
+    <div><span>Duplicates blocked</span><b id="c-blk">0</b></div>
+    <div><span>Duplicates applied twice</span><b id="c-leak">0</b></div>
+    <div><span>Lost to dead letter queue</span><b id="c-dlq">0</b></div>
+  </div>
+  <p id="verdict"></p>
+</div>
+
+<div class="panel"><h2>What the engine is doing</h2><ul id="log"></ul></div>
+
+<div class="panel">
+  <h2>Try this</h2>
+  <ol>
+    <li>Press <b>Healthy system</b>. Duplicates are blocked and nothing leaks.</li>
+    <li>Press <b>Retry storm</b>. The store slows down, writes time out, retries pile up, and the stream backs up.</li>
+    <li>Press <b>Storm without idempotent writes</b>. Retries now apply twice, so the duplicate counter climbs even with de-duplication on.</li>
+    <li>Turn de-duplication off in the healthy state to see every repeat reach the sink.</li>
+  </ol>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const S={};
+let paused=false;
+function reset(){
+  Object.assign(S,{sent:0,stream:0,q:0,retry:0,dlq:0,done:0,blk:0,leak:0,
+    r:{blk:0,busy:0,ret:0,wrk:0},fired:{}});
+  $('log').innerHTML='';
+}
+function say(m){const li=document.createElement('li');li.innerHTML=m;const l=$('log');l.prepend(li);while(l.children.length>40)l.lastChild.remove();}
+
+function tick(){
+  const dt=.1,load=+$('load').value,d=+$('dup').value/100,lock=+$('lock').value/100;
+  const dd=$('dd').checked,idem=$('idem').checked,share=d/(1+d);
+
+  S.sent+=load*dt; S.stream+=load*(1+d)*dt;
+
+  // worker slows as the retry pool grows (retries compete for its capacity)
+  const wcap=160/(1+S.retry/100);
+  const take=Math.min(S.stream,wcap*dt); S.stream-=take;
+  const blk=dd?take*share:0, fwd=take-blk; S.blk+=blk;
+
+  // store: lock contention cuts throughput
+  const cap=120/(1+lock*9);
+  const rin=S.retry*Math.min(1,3*dt); S.retry-=rin;
+  const inflow=fwd+rin; S.q+=inflow;
+  const srv=Math.min(S.q,cap*dt); S.q-=srv;
+  let to=0; const maxq=cap*.5;
+  if(S.q>maxq){to=S.q-maxq;S.q=maxq;}
+  S.retry+=to*.7; const dl=to*.3; S.dlq+=dl;
+
+  // what reaches the sink
+  const rs=inflow?rin/inflow:0;
+  const leak=srv*((dd?0:share*(1-rs))+(idem?0:rs*.5));
+  S.leak+=leak; S.done+=srv-leak;
+
+  const k=.12,r=S.r;
+  r.blk+=(blk/dt-r.blk)*k;
+  r.busy+=((S.q>0.5||to>0?1:srv/(cap*dt))-r.busy)*k;
+  r.ret+=((rin+to)/dt-r.ret)*k;
+  r.wrk+=(take/dt-r.wrk)*k;
+  S.wait=S.q/cap*1000+5; S.cap=cap; S.wcap=wcap; S.load=load; S.d=d;
+  render(); narrate(dd,idem);
+}
+
+function setNode(id,val,bar,lvl){
+  const n=$('n-'+id);n.className='node'+(lvl?' '+lvl:'');
+  $('b-'+id).style.width=Math.min(100,bar*100)+'%';
+}
+const lv=(x,w,b)=>x>=b?'bad':x>=w?'warn':'';
+function render(){
+  const r=S.r,busy=r.busy;
+  $('v-prod').textContent=Math.round(S.load)+'/s';
+  $('s-prod').textContent=Math.round(S.d*100)+'% sent twice';
+  setNode('prod',0,S.load/300,'');
+  $('v-str').textContent=Math.round(S.stream);
+  setNode('str',0,S.stream/3000,lv(S.stream,300,1500));
+  $('v-wrk').textContent=Math.round(r.blk)+'/s';
+  $('s-wrk').textContent=$('dd').checked?'duplicates dropped':'de-dup off, all pass';
+  setNode('wrk',0,r.wrk/160,lv(1-S.wcap/160,.3,.6));
+  $('v-sto').textContent=Math.round(busy*100)+'%';
+  $('s-sto').textContent='about '+Math.round(S.wait)+' ms write wait';
+  setNode('sto',0,busy,lv(busy,.75,.93));
+  $('v-snk').textContent=Math.round(S.done).toLocaleString();
+  $('s-snk').textContent=Math.round(S.leak)+' applied twice';
+  setNode('snk',0,0,S.leak>=1?'bad':'');
+  $('v-ret').textContent=Math.round(r.ret)+'/s';
+  $('s-ret').textContent=Math.round(S.retry)+' in flight';
+  setNode('ret',0,r.ret/300,lv(r.ret,20,80));
+  $('v-dlq').textContent=Math.round(S.dlq).toLocaleString();
+  setNode('dlq',0,S.dlq/2000,lv(S.dlq,1,100));
+  $('c-sent').textContent=Math.round(S.sent).toLocaleString();
+  $('c-done').textContent=Math.round(S.done).toLocaleString();
+  $('c-blk').textContent=Math.round(S.blk).toLocaleString();
+  $('c-leak').textContent=Math.round(S.leak).toLocaleString();
+  $('c-dlq').textContent=Math.round(S.dlq).toLocaleString();
+  const v=$('verdict');
+  if(S.leak>=1){v.style.color='var(--bad)';v.textContent=$('dd').checked?'Duplicates are being applied twice. A retried write can repeat an effect that already committed.':'Duplicates are reaching the sink. Nothing is checking event IDs.';}
+  else if(S.dlq>=20||S.stream>500){v.style.color='var(--warn)';v.textContent='No duplicates leaked, but the system is falling behind and dropping events into the dead letter queue.';}
+  else{v.style.color='var(--ok)';v.textContent='Each event has been applied once. The exactly-once effect holds.';}
+}
+
+const rules=[
+ ['dup',(a)=>a.dd&&S.r.blk>1,'<b>De-dup worker</b> checks each event ID against the store and drops repeats.'],
+ ['nodd',(a)=>!a.dd&&S.leak>=1,'<b>De-dup off</b>: repeated events pass straight through to the sink.'],
+ ['busy',()=>S.r.busy>.93,'<b>Store</b> is saturated. Lock wait grows and writes start timing out.'],
+ ['retry',()=>S.r.ret>20,'<b>Retries</b> re-enter the store, adding load to the component that is already struggling.'],
+ ['lag',()=>S.stream>300,'<b>Stream</b> lag grows. Retries are using up the worker\'s capacity.'],
+ ['dlq',()=>S.dlq>=1,'<b>Dead letter queue</b> receives events whose retries are exhausted. Nothing drains it.'],
+ ['dbl',(a)=>!a.idem&&S.leak>=1,'<b>Non-idempotent retry</b>: the first write committed after the timeout, so the retry applied it again.']
+];
+function narrate(dd,idem){
+  const a={dd,idem};
+  rules.forEach(([k,f,m])=>{const on=f(a);if(on&&!S.fired[k])say(m);S.fired[k]=on;});
+  if(!S.fired.ok&&S.r.busy<.5&&S.dlq<1&&S.stream<50&&S.sent>200){S.fired.ok=1;say('<b>All clear</b>: queues are short and the store has headroom.');}
+}
+
+function preset(l,dp,lk,dd,id){
+  $('load').value=l;$('dup').value=dp;$('lock').value=lk;$('dd').checked=dd;$('idem').checked=id;
+  reset();syncOut();
+}
+function syncOut(){$('o-load').textContent=$('load').value+'/s';$('o-dup').textContent=$('dup').value+'%';$('o-lock').textContent=$('lock').value+'%';}
+['load','dup','lock'].forEach(i=>$(i).addEventListener('input',syncOut));
+$('p-ok').onclick=()=>preset(50,20,0,true,true);
+$('p-storm').onclick=()=>preset(100,20,85,true,true);
+$('p-naive').onclick=()=>preset(100,20,85,true,false);
+$('reset').onclick=reset;
+$('pause').onclick=()=>{paused=!paused;$('pause').textContent=paused?'Resume':'Pause';};
+reset();syncOut();
+setInterval(()=>{if(!paused)tick();},100);
+</script>
+</body>
+</html>
